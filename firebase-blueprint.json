@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Perfis de usuários, colaboradores e administradores com controle de acesso por papel e franquia.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID do usuário" },
+        "name": { "type": "string", "description": "Nome do usuário", "maxLength": 100 },
+        "email": { "type": "string", "description": "E-mail de acesso", "maxLength": 120 },
+        "role": { "type": "string", "description": "Papel no sistema", "enum": ["colaborador", "usuario_normal", "admin", "admin_franquia"] },
+        "franchise": { "type": "string", "description": "Franquia vinculada", "maxLength": 30 },
+        "active": { "type": "boolean", "description": "Status do usuário" },
+        "createdAt": { "type": "string", "description": "Data de criação ISO" },
+        "updatedAt": { "type": "string", "description": "Data de atualização ISO" }
+      },
+      "required": ["id", "name", "email", "role", "franchise", "createdAt"]
+    },
+    "ShiftBilling": {
+      "title": "ShiftBilling",
+      "description": "Lançamento diário e mensal de faturamento de turno da franquia.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID do faturamento" },
+        "date": { "type": "string", "description": "Data YYYY-MM-DD", "maxLength": 10 },
+        "month": { "type": "string", "description": "Mês YYYY-MM para consolidação mensal", "maxLength": 7 },
+        "shift": { "type": "string", "description": "Turno", "enum": ["Manhã", "Tarde", "Noite"] },
+        "franchise": { "type": "string", "description": "Código da franquia", "maxLength": 30 },
+        "collaboratorId": { "type": "string", "description": "ID do colaborador" },
+        "collaboratorName": { "type": "string", "description": "Nome do colaborador", "maxLength": 100 },
+        "totalProductsAmount": { "type": "number", "description": "Total de produtos faturados" },
+        "totalPaymentsAmount": { "type": "number", "description": "Total apurado em pagamentos" },
+        "totalAmount": { "type": "number", "description": "Valor final consolidado" },
+        "differenceAmount": { "type": "number", "description": "Divergência de caixa" },
+        "status": { "type": "string", "description": "Status de auditoria", "enum": ["Pendente", "Aprovado", "Rejeitado"] },
+        "collaboratorNotes": { "type": "string", "description": "Observações do turno", "maxLength": 500 },
+        "auditNotes": { "type": "string", "description": "Parecer do auditor", "maxLength": 500 },
+        "auditedBy": { "type": "string", "description": "Nome do auditor", "maxLength": 100 },
+        "auditedAt": { "type": "string", "description": "Data de auditoria" },
+        "createdAt": { "type": "string", "description": "Data de criação" },
+        "updatedAt": { "type": "string", "description": "Data de atualização" }
+      },
+      "required": ["id", "date", "month", "shift", "franchise", "totalAmount", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Coleção de colaboradores e administradores com papéis e filiais."
+    },
+    "/billings/{billingId}": {
+      "schema": "ShiftBilling",
+      "description": "Coleção de faturamentos diários e mensais por turno e franquia."
+    }
+  }
+}

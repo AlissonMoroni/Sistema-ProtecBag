@@ -1,0 +1,42 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // All users created or authenticated directly via Firebase are Admins
+    function isAdmin() {
+      return isSignedIn() || (
+        request.auth != null && (
+          request.auth.token.email == 'thetoic@gmail.com' ||
+          request.auth.token.email == 'admin@protecbag.com.br' ||
+          request.auth.token.firebase != null
+        )
+      );
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Connection test document
+    match /test/connection {
+      allow read, write: if true;
+    }
+
+    // Users & Collaborators collection
+    // Permite leitura, gravação e exclusão persistente de colaboradores
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    // Billings collection (faturamentos diários e mensais)
+    // Permite leitura, gravação e exclusão de lançamentos pela administração
+    match /billings/{billingId} {
+      allow read, write: if true;
+    }
+  }
+}

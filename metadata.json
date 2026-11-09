@@ -1,0 +1,6 @@
+{
+  "name": "Faturamento Diário ProtecBag",
+  "description": "Sistema corporativo de controle de faturamento diário por turnos, isolamento por franquia, auditoria administrativa e dashboard gerencial com gráficos Recharts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

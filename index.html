@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Faturamento Diário ProtecBag</title>
+    <meta name="description" content="Sistema corporativo de controle de faturamento diário por turnos, isolamento por franquia, auditoria administrativa e dashboard gerencial com gráficos Recharts." />
+    <meta property="og:title" content="Faturamento Diário ProtecBag" />
+    <meta property="og:description" content="Sistema corporativo de controle de faturamento diário por turnos, isolamento por franquia, auditoria administrativa e dashboard gerencial com gráficos Recharts." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'],
+              mono: ['"JetBrains Mono"', 'monospace'],
+            },
+            colors: {
+              brand: {
+                50: '#eef8ff',
+                100: '#d9f0ff',
+                200: '#bce4ff',
+                500: '#0284c7',
+                600: '#0369a1',
+                700: '#075985',
+                800: '#0c4a6e',
+                900: '#082f49',
+              },
+              protec: {
+                blue: '#0047AB',
+                navy: '#0A192F',
+                gold: '#F59E0B',
+                emerald: '#10B981',
+                crimson: '#EF4444'
+              }
+            }
+          }
+        }
+      }
+    </script>
+    <link rel="stylesheet" href="/src/index.css" />
+  </head>
+  <body class="bg-slate-900 text-slate-100 min-h-screen antialiased selection:bg-sky-500 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
