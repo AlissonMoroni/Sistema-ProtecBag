@@ -5,6 +5,7 @@ import {
   collection,
   doc,
   getDoc,
+  getDocs,
   setDoc,
   deleteDoc,
   updateDoc,
@@ -277,13 +278,29 @@ export const storage = {
     }
   },
 
-  // ----- usuários -----
-  /** Lê o perfil de quem acabou de logar (documento /users/{email}). */
+  /** Lê o perfil de quem acabou de logar (documento /users/{email} ou por campo de e-mail). */
   async fetchOwnProfile(email: string): Promise<User | null> {
     const key = email.trim().toLowerCase();
-    const snap = await getDoc(doc(db, 'users', key));
-    if (!snap.exists()) return null;
-    return { ...(snap.data() as User), docId: snap.id };
+    try {
+      const snap = await getDoc(doc(db, 'users', key));
+      if (snap.exists()) {
+        return { ...(snap.data() as User), docId: snap.id };
+      }
+    } catch (e) {
+      console.warn('Erro ao buscar perfil por chave direta:', e);
+    }
+
+    try {
+      const q = query(collection(db, 'users'), where('email', '==', key));
+      const qSnap = await getDocs(q);
+      if (!qSnap.empty) {
+        const d = qSnap.docs[0];
+        return { ...(d.data() as User), docId: d.id };
+      }
+    } catch (e) {
+      console.warn('Erro ao buscar perfil por query:', e);
+    }
+    return null;
   },
 
   /** Escuta mudanças no próprio perfil (desativação, troca de papel). */

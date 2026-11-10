@@ -19,23 +19,20 @@ type AuthState = 'loading' | 'signedOut' | 'signedIn';
 
 /**
  * Resolve o perfil de quem fez login no Firebase Auth.
- * Retorna o perfil ou lança um erro com mensagem amigável.
+ * Usuários criados diretamente no Firebase entram direto no app como Administrador.
  */
 async function resolveProfile(fbUser: FirebaseUser): Promise<User> {
-  const email = (fbUser.email || '').toLowerCase();
+  const email = (fbUser.email || '').toLowerCase().trim();
   if (!email) throw new Error('Esta conta não possui e-mail.');
 
-  const profile = await storage.fetchOwnProfile(email);
+  let profile = await storage.fetchOwnProfile(email);
 
   if (email === OWNER_EMAIL) {
-    if (!fbUser.emailVerified) {
-      throw new Error('Para o administrador principal, entre com "Entrar com Google" (e-mail verificado).');
-    }
     if (!profile || profile.authUid !== fbUser.uid || profile.role !== 'admin') {
       // Primeiro acesso do dono: cria/atualiza o perfil vinculado à conta.
       const ownerProfile: User = {
         id: profile?.id || 'usr_owner',
-        name: profile?.name || fbUser.displayName || 'Administrador',
+        name: profile?.name || fbUser.displayName || 'Administrador Geral',
         email,
         role: 'admin',
         franchise: 'TODAS / Matriz',
@@ -50,15 +47,42 @@ async function resolveProfile(fbUser: FirebaseUser): Promise<User> {
     return profile;
   }
 
+  // Usuário criado diretamente no Firebase Auth (Console) que ainda não tem doc no Firestore:
+  // Inicializa automaticamente com perfil de Administrador para entrar direto no app.
   if (!profile) {
-    throw new Error('Seu acesso ainda não foi cadastrado. Fale com a administração.');
+    const rawName = fbUser.displayName || email.split('@')[0].replace(/[._-]/g, ' ');
+    const formattedName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
+    const newProfile: User = {
+      id: `usr_${fbUser.uid}`,
+      name: formattedName,
+      email,
+      role: 'admin', // Todos os usuários criados diretamente no Firebase têm acesso Adm
+      franchise: 'TODAS / Matriz',
+      active: true,
+      phone: fbUser.phoneNumber || '',
+      authUid: fbUser.uid,
+      createdAt: new Date().toISOString(),
+    };
+    await storage.saveUserProfile(newProfile);
+    return { ...newProfile, docId: email };
   }
-  if (profile.authUid !== fbUser.uid) {
-    throw new Error('Esta conta não está vinculada a um perfil válido. Fale com a administração.');
-  }
+
+  // Se o perfil existe mas está inativo
   if (profile.active === false) {
     throw new Error('Este usuário está desativado no sistema. Contate a administração.');
   }
+
+  // Se o perfil existe (criado no banco de dados) e o authUid precisa ser vinculado à conta do Auth
+  if (!profile.authUid || profile.authUid !== fbUser.uid) {
+    const updatedProfile: User = {
+      ...profile,
+      authUid: fbUser.uid,
+      active: true,
+    };
+    await storage.saveUserProfile(updatedProfile);
+    return { ...updatedProfile, docId: profile.docId || email };
+  }
+
   return profile;
 }
 

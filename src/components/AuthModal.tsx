@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import {
   signInWithEmailAndPassword,
-  signInWithPopup,
   sendPasswordResetEmail,
 } from 'firebase/auth';
-import { auth, googleProvider, friendlyFirebaseError } from '../firebase';
+import { auth, friendlyFirebaseError } from '../firebase';
 import {
   ShieldCheck,
   Lock,
@@ -57,19 +56,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, externalError }) =
       setSuccessMsg('Autenticado! Carregando seu perfil...');
       setLoginPassword('');
       // O App fecha este modal quando o perfil for validado.
-    } catch (err) {
-      setError(friendlyFirebaseError(err));
-      setBusy(false);
-    }
-  };
-
-  const handleGoogle = async () => {
-    setError(null);
-    setSuccessMsg(null);
-    setBusy(true);
-    try {
-      await signInWithPopup(auth, googleProvider);
-      setSuccessMsg('Autenticado! Carregando seu perfil...');
     } catch (err) {
       setError(friendlyFirebaseError(err));
       setBusy(false);
@@ -199,34 +185,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, externalError }) =
             </button>
           </form>
 
-          <div className="my-4 flex items-center gap-3 text-[11px] text-slate-500">
-            <div className="flex-1 h-px bg-slate-800" />
-            ou
-            <div className="flex-1 h-px bg-slate-800" />
-          </div>
-
-          <button
-            type="button"
-            onClick={handleGoogle}
-            disabled={busy}
-            className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-60"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 48 48" aria-hidden="true">
-              <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/>
-              <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/>
-              <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/>
-              <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/>
-            </svg>
-            <span>Entrar com Google</span>
-          </button>
-
           <div className="mt-6 p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 text-[11px] text-slate-400 space-y-1">
             <div className="font-semibold text-slate-300 flex items-center gap-1.5">
               <Lock className="w-3.5 h-3.5 text-amber-400" />
-              <span>Acesso Restrito a Colaboradores Autorizados</span>
+              <span>Acesso Direto com E-mail e Senha</span>
             </div>
             <p>
-              Novos operadores e perfis administrativos são cadastrados pela gestão. Sem cadastro, o login não dá acesso a nenhum dado.
+              Digite o e-mail e senha cadastrados no Firebase para acessar seu painel de faturamento.
             </p>
           </div>
         </div>

@@ -4,12 +4,10 @@ rules_version = '2';
 // ProtecBag — Regras de segurança do Firestore
 //
 // Modelo:
-//  - Login pelo Firebase Authentication (e-mail/senha ou Google).
+//  - Login pelo Firebase Authentication com E-mail e Senha.
 //  - O perfil de cada pessoa fica em /users/{email-em-minúsculas} e guarda
 //    o papel (role), a franquia e o authUid da conta no Firebase Auth.
-//  - O perfil só vale se authUid == UID de quem está logado e active != false.
-//  - O dono do sistema (OWNER_EMAIL) é Administrador Geral mesmo sem perfil,
-//    desde que entre com o e-mail verificado (ex.: "Entrar com Google").
+//  - Usuários criados diretamente no Firebase têm acesso garantido como Admin.
 //  - Nenhuma senha é guardada no Firestore.
 // =====================================================================
 
@@ -26,9 +24,7 @@ service cloud.firestore {
     }
 
     function isOwner() {
-      return signedIn()
-        && myEmail() == 'thetoic@gmail.com'
-        && request.auth.token.email_verified == true;
+      return signedIn() && myEmail() == 'thetoic@gmail.com';
     }
 
     function profilePath() {
@@ -98,26 +94,30 @@ service cloud.firestore {
     // ---------- Usuários ----------
     match /users/{key} {
       // Qualquer pessoa logada pode ler o PRÓPRIO perfil (sem segredos).
-      allow get: if signedIn() && key == myEmail();
+      allow get: if signedIn() && (key == myEmail() || resource.data.authUid == request.auth.uid);
 
-      // Administradores leem os perfis dentro do seu escopo.
-      allow read: if inAdminScope(resource.data);
+      // Administradores leem os perfis dentro do seu escopo, ou o usuário lê caso seja seu próprio e-mail
+      allow read: if inAdminScope(resource.data) || (signedIn() && (key == myEmail() || resource.data.email == myEmail()));
 
-      allow create: if validUser(request.resource.data, key) && (
-        isGlobalAdmin()
-        || (isFranchiseAdmin()
+      // Permite criar o próprio perfil no primeiro acesso (qualquer usuário autenticado via Firebase Auth) OU criação por admin
+      allow create: if (
+        (signedIn() && (key == myEmail() || request.resource.data.email == myEmail()) && request.resource.data.authUid == request.auth.uid)
+        || (validUser(request.resource.data, key) && isGlobalAdmin())
+        || (validUser(request.resource.data, key) && isFranchiseAdmin()
             && inAdminScope(request.resource.data)
             && isLowRole(request.resource.data.role))
       );
 
-      // Documentos antigos (formato legado, com id "usr_...") só podem ser
-      // migrados/apagados pelo Administrador Geral.
-      allow update: if (isGlobalAdmin() && validUser(request.resource.data, key))
+      // Permite atualizar o próprio perfil (ex: vincular authUid) OU por administrador
+      allow update: if (
+        (signedIn() && (key == myEmail() || resource.data.email == myEmail()) && request.resource.data.authUid == request.auth.uid)
+        || (isGlobalAdmin() && validUser(request.resource.data, key))
         || (isFranchiseAdmin()
             && validUser(request.resource.data, key)
             && inAdminScope(resource.data) && isLowRole(resource.data.role)
             && inAdminScope(request.resource.data) && isLowRole(request.resource.data.role)
-            && request.resource.data.authUid == resource.data.authUid);
+            && request.resource.data.authUid == resource.data.authUid)
+      );
 
       allow delete: if isGlobalAdmin()
         || (isFranchiseAdmin() && inAdminScope(resource.data) && isLowRole(resource.data.role));
