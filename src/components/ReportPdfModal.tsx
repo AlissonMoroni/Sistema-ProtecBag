@@ -7,10 +7,11 @@ import {
   formatDateBR, 
   formatMonthBR, 
   canAdminAccessFranchise,
-  getAllowedFranchisesForAdmin 
-} from '../mockData';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+  getAllowedFranchisesForAdmin,
+  isGlobalAdmin as checkGlobalAdmin,
+  todayLocalISO,
+} from '../store';
+// jsPDF é carregado só quando o usuário clica em gerar o PDF (deixa o site mais leve)
 import { 
   FileText, 
   Download, 
@@ -41,11 +42,7 @@ export const ReportPdfModal: React.FC<ReportPdfModalProps> = ({
   currentUser,
   billings,
 }) => {
-  const isGlobalAdmin =
-    currentUser.role === 'admin' &&
-    (currentUser.franchise === 'TODAS' ||
-      currentUser.franchise === 'TODAS / Matriz' ||
-      currentUser.email === 'thetoic@gmail.com');
+  const isGlobalAdmin = checkGlobalAdmin(currentUser);
 
   const allowedFranchises = useMemo(
     () => getAllowedFranchisesForAdmin(currentUser),
@@ -55,18 +52,21 @@ export const ReportPdfModal: React.FC<ReportPdfModalProps> = ({
   // Available months extracted from billings
   const availableMonths = useMemo(() => {
     const months = Array.from(new Set(billings.map((b) => b.month || b.date.substring(0, 7)))).filter(Boolean);
-    // Ensure 2026-09 and 2026-11 are present
-    if (!months.includes('2026-09')) months.push('2026-09');
-    if (!months.includes('2026-11')) months.push('2026-11');
+    const current = todayLocalISO().substring(0, 7);
+    if (!months.includes(current)) months.push(current);
     return months.sort().reverse();
   }, [billings]);
 
   // Form states
   const [periodType, setPeriodType] = useState<'monthly' | 'weekly'>('monthly');
-  const [selectedMonth, setSelectedMonth] = useState<string>('2026-09');
-  
-  // Weekly default: 2026-11-02 to 2026-11-08 (or last 7 days)
-  const [weekStartDate, setWeekStartDate] = useState<string>('2026-11-02');
+  // Padrões: mês atual e semana atual (antes eram datas fixas de demonstração)
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => todayLocalISO().substring(0, 7));
+  const [weekStartDate, setWeekStartDate] = useState<string>(() => {
+    const d = new Date();
+    const diffToMonday = (d.getDay() + 6) % 7;
+    d.setDate(d.getDate() - diffToMonday);
+    return todayLocalISO(d);
+  });
   const [selectedFranchise, setSelectedFranchise] = useState<string>(
     isGlobalAdmin ? 'TODAS' : currentUser.franchise
   );
@@ -76,9 +76,9 @@ export const ReportPdfModal: React.FC<ReportPdfModalProps> = ({
   // Calculate week end date
   const weekEndDate = useMemo(() => {
     if (!weekStartDate) return '';
-    const d = new Date(weekStartDate + 'T12:00:00Z');
+    const d = new Date(weekStartDate + 'T12:00:00');
     d.setDate(d.getDate() + 6);
-    return d.toISOString().split('T')[0];
+    return todayLocalISO(d);
   }, [weekStartDate]);
 
   // Filtered billings for the report
@@ -252,10 +252,14 @@ export const ReportPdfModal: React.FC<ReportPdfModalProps> = ({
       : `${selectedFranchise} — ${FRANCHISES.find((f) => f.code === selectedFranchise)?.airport || ''}`;
 
   // PDF Generation Logic
-  const handleDownloadPdf = () => {
+  const handleDownloadPdf = async () => {
     setIsGenerating(true);
 
     try {
+      const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+        import('jspdf'),
+        import('jspdf-autotable'),
+      ]);
       const doc = new jsPDF({
         orientation: 'portrait',
         unit: 'mm',
@@ -457,6 +461,7 @@ export const ReportPdfModal: React.FC<ReportPdfModalProps> = ({
       doc.save(`faturamento-protecbag-${cleanPeriodName}-${cleanFranchise}.pdf`);
     } catch (err) {
       console.error('Erro ao gerar PDF:', err);
+      window.alert('Não foi possível gerar o PDF. Tente novamente.');
     } finally {
       setIsGenerating(false);
     }

@@ -1,34 +1,56 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
+import { sendPasswordResetEmail } from 'firebase/auth';
 import { User, UserRole } from '../types';
-import { FRANCHISES, storage } from '../mockData';
-import { 
-  Users, 
-  UserPlus, 
-  ShieldCheck, 
-  Building2, 
-  Mail, 
-  Phone, 
-  Lock, 
-  Edit3, 
-  Trash2, 
-  CheckCircle2, 
-  XCircle, 
-  Search, 
-  CloudCheck, 
-  Sparkles, 
+import {
+  FRANCHISES,
+  storage,
+  useStoreVersion,
+  isGlobalAdmin,
+  canAdminAccessFranchise,
+  getAllowedFranchisesForAdmin,
+  generateTempPassword,
+  regionOf,
+  csvCell,
+  todayLocalISO,
+} from '../store';
+import { auth, friendlyFirebaseError } from '../firebase';
+import {
+  Users,
+  UserPlus,
+  ShieldCheck,
+  Building2,
+  Mail,
+  Phone,
+  Lock,
+  Edit3,
+  Trash2,
+  CheckCircle2,
+  XCircle,
+  Search,
+  CloudCheck,
+  Sparkles,
   Key,
   Shield,
   Eye,
   FileEdit,
-  X
+  X,
+  AlertTriangle,
+  RefreshCw,
+  Download,
 } from 'lucide-react';
 
 interface CollaboratorsManagerProps {
-  onUsersUpdated: () => void;
+  currentUser: User;
 }
 
-export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUsersUpdated }) => {
-  const [users, setUsers] = useState<User[]>(() => storage.getUsers());
+type MigrationResult = Awaited<ReturnType<typeof storage.migrateLegacyData>>;
+
+export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ currentUser }) => {
+  const storeVersion = useStoreVersion();
+  const users = useMemo<User[]>(() => storage.getUsers(), [storeVersion]);
+  const globalAdmin = isGlobalAdmin(currentUser);
+  const allowedFranchises = useMemo(() => getAllowedFranchisesForAdmin(currentUser), [currentUser]);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<string>('TODOS');
   const [franchiseFilter, setFranchiseFilter] = useState<string>('TODAS');
@@ -43,135 +65,216 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
   const [formEmail, setFormEmail] = useState('');
   const [formPassword, setFormPassword] = useState('');
   const [formRole, setFormRole] = useState<UserRole>('colaborador');
-  const [formFranchise, setFormFranchise] = useState('CWB01');
+  const [formFranchise, setFormFranchise] = useState(allowedFranchises[0]?.code || 'CWB01');
   const [formPhone, setFormPhone] = useState('');
   const [formActive, setFormActive] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
+  const [formInfo, setFormInfo] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
 
-  const refreshList = () => {
-    const list = storage.getUsers();
-    setUsers(list);
-    onUsersUpdated();
+  // Migração de dados antigos (somente Administrador Geral)
+  const legacyUsers = useMemo(() => (globalAdmin ? storage.getLegacyUsers() : []), [globalAdmin, storeVersion]);
+  const billingsMissingRegion = useMemo(
+    () => (globalAdmin ? storage.getBillingsMissingRegion().length : 0),
+    [globalAdmin, storeVersion]
+  );
+  const [migrating, setMigrating] = useState(false);
+  const [migrationResult, setMigrationResult] = useState<MigrationResult | null>(null);
+
+  /** Admin de franquia só gerencia colaboradores/consulta da própria base; ninguém altera a si mesmo aqui. */
+  const canManage = (u: User): boolean => {
+    if (u.email?.toLowerCase() === currentUser.email.toLowerCase()) return false;
+    if (globalAdmin) return true;
+    return (
+      (u.role === 'colaborador' || u.role === 'usuario_normal') &&
+      canAdminAccessFranchise(currentUser, u.franchise)
+    );
+  };
+
+  const resetForm = () => {
+    setFormName('');
+    setFormEmail('');
+    setFormPassword('');
+    setFormPhone('');
+    setFormRole('colaborador');
+    setFormFranchise(allowedFranchises[0]?.code || 'CWB01');
+    setFormActive(true);
+    setFormError(null);
+    setFormInfo(null);
+    setEditingUser(null);
   };
 
   const openNewUserModal = () => {
-    setEditingUser(null);
-    setFormName('');
-    setFormEmail('');
-    setFormPassword('123');
-    setFormRole('colaborador');
-    setFormFranchise('CWB01');
-    setFormPhone('');
-    setFormActive(true);
-    setFormError(null);
+    resetForm();
+    setFormPassword(generateTempPassword(10));
     setIsModalOpen(true);
   };
 
   const openEditUserModal = (u: User) => {
+    resetForm();
     setEditingUser(u);
     setFormName(u.name);
     setFormEmail(u.email);
-    setFormPassword(u.password || '');
     setFormRole(u.role);
     setFormFranchise(u.franchise);
     setFormPhone(u.phone || '');
     setFormActive(u.active !== false);
-    setFormError(null);
     setIsModalOpen(true);
   };
 
-  const handleSaveUser = (e: React.FormEvent) => {
+  const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
 
-    if (!formName.trim() || !formEmail.trim()) {
+    const email = formEmail.trim().toLowerCase();
+    if (!formName.trim() || !email) {
       setFormError('Por favor, informe ao menos o Nome e o E-mail.');
       return;
+    }
+
+    // Admin de franquia não pode criar administradores nem usar outra base
+    if (!globalAdmin) {
+      if (formRole !== 'colaborador' && formRole !== 'usuario_normal') {
+        setFormError('Administradores de franquia só podem cadastrar Colaboradores ou Usuários de Consulta.');
+        return;
+      }
+      if (!canAdminAccessFranchise(currentUser, formFranchise)) {
+        setFormError('Você só pode cadastrar usuários na sua base.');
+        return;
+      }
     }
 
     // Check duplicate email
     const duplicate = users.find(
       (u) =>
-        u.email.toLowerCase() === formEmail.trim().toLowerCase() &&
-        (!editingUser || u.id !== editingUser.id)
+        u.email.toLowerCase() === email &&
+        (!editingUser || u.docId !== editingUser.docId)
     );
     if (duplicate) {
       setFormError('Já existe um usuário cadastrado com este e-mail corporativo.');
       return;
     }
 
+    if (!editingUser && formPassword.length < 6) {
+      setFormError('A senha inicial precisa ter pelo menos 6 caracteres.');
+      return;
+    }
+
     const franchiseValue = formRole === 'admin' ? 'TODAS / Matriz' : formFranchise;
 
-    if (editingUser) {
-      const updated: User = {
-        ...editingUser,
-        name: formName.trim(),
-        email: formEmail.trim().toLowerCase(),
-        password: formPassword || editingUser.password,
-        role: formRole,
-        franchise: franchiseValue,
-        phone: formPhone.trim(),
-        active: formActive,
-        updatedAt: new Date().toISOString(),
-      };
-      storage.updateUser(updated);
-    } else {
-      const newUser: User = {
-        id: `usr_${Date.now()}`,
-        name: formName.trim(),
-        email: formEmail.trim().toLowerCase(),
-        password: formPassword || '123',
-        role: formRole,
-        franchise: franchiseValue,
-        phone: formPhone.trim(),
-        active: formActive,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      storage.saveUser(newUser);
+    setSaving(true);
+    try {
+      if (editingUser) {
+        if (!editingUser.authUid) {
+          setFormError('Este perfil ainda está no formato antigo. Use "Migrar usuários antigos" antes de editá-lo.');
+          return;
+        }
+        await storage.saveUserProfile({
+          ...editingUser,
+          name: formName.trim(),
+          email: editingUser.email.toLowerCase(), // e-mail é a chave da conta: não muda
+          role: formRole,
+          franchise: franchiseValue,
+          phone: formPhone.trim(),
+          active: formActive,
+        });
+      } else {
+        await storage.createUserWithAccess(
+          {
+            id: `usr_${Date.now()}`,
+            name: formName.trim(),
+            email,
+            role: formRole,
+            franchise: franchiseValue,
+            phone: formPhone.trim(),
+            active: formActive,
+            createdAt: new Date().toISOString(),
+          },
+          formPassword
+        );
+      }
+      resetForm();
+      setIsModalOpen(false);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Falha ao salvar o usuário.');
+    } finally {
+      setSaving(false);
     }
+  };
 
-    // Clear all fields so previous data is never carried over
-    setFormName('');
-    setFormEmail('');
-    setFormPassword('');
-    setFormPhone('');
-    setFormRole('colaborador');
-    setFormFranchise('CWB01');
-    setEditingUser(null);
+  const handleSendReset = async () => {
+    if (!editingUser) return;
     setFormError(null);
-
-    setIsModalOpen(false);
-    refreshList();
-  };
-
-  const handleToggleActive = (u: User) => {
-    const updated: User = {
-      ...u,
-      active: u.active === false ? true : false,
-      updatedAt: new Date().toISOString(),
-    };
-    storage.updateUser(updated);
-    refreshList();
-  };
-
-  const handleDeleteUser = (userId: string, name: string) => {
-    if (window.confirm(`Tem certeza que deseja excluir o usuário "${name}"?`)) {
-      storage.deleteUser(userId);
-      refreshList();
+    setFormInfo(null);
+    try {
+      await sendPasswordResetEmail(auth, editingUser.email);
+      setFormInfo(`Link de redefinição de senha enviado para ${editingUser.email}.`);
+    } catch (err) {
+      setFormError(friendlyFirebaseError(err));
     }
+  };
+
+  const handleToggleActive = async (u: User) => {
+    if (!canManage(u)) return;
+    if (!u.authUid) {
+      setListError('Este perfil ainda está no formato antigo. Rode a migração primeiro.');
+      return;
+    }
+    setListError(null);
+    try {
+      await storage.saveUserProfile({ ...u, active: u.active === false });
+    } catch (err) {
+      setListError(err instanceof Error ? err.message : 'Falha ao alterar o status.');
+    }
+  };
+
+  const handleMigrate = async () => {
+    setMigrating(true);
+    setListError(null);
+    try {
+      setMigrationResult(await storage.migrateLegacyData());
+    } catch (err) {
+      setListError(err instanceof Error ? err.message : 'Falha na migração.');
+    } finally {
+      setMigrating(false);
+    }
+  };
+
+  const downloadMigrationCsv = () => {
+    if (!migrationResult) return;
+    const rows = [
+      ['Nome', 'E-mail', 'Senha temporária', 'Status', 'Observação'].map(csvCell).join(';'),
+      ...migrationResult.users.map((r) =>
+        [r.name, r.email, r.tempPassword || '', r.status, r.message || ''].map(csvCell).join(';')
+      ),
+    ];
+    const blob = new Blob(['﻿' + rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `protecbag_senhas_temporarias_${todayLocalISO()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   // Filtered users
   const filteredUsers = users.filter((u) => {
+    const term = searchTerm.trim().toLowerCase();
     const matchSearch =
-      searchTerm.trim() === '' ||
-      u.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      u.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      u.franchise.toLowerCase().includes(searchTerm.toLowerCase());
+      term === '' ||
+      u.name.toLowerCase().includes(term) ||
+      u.email.toLowerCase().includes(term) ||
+      u.franchise.toLowerCase().includes(term);
 
     const matchRole = roleFilter === 'TODOS' || u.role === roleFilter;
-    const matchFranchise = franchiseFilter === 'TODAS' || u.franchise === franchiseFilter;
+    // "CWB" agora inclui CWB01/02/03 (antes só achava quem tinha exatamente "CWB")
+    const matchFranchise =
+      franchiseFilter === 'TODAS' ||
+      u.franchise === franchiseFilter ||
+      (franchiseFilter.length === 3 && regionOf(u.franchise) === franchiseFilter);
 
     return matchSearch && matchRole && matchFranchise;
   });
@@ -206,6 +309,108 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
           <span>Cadastrar Novo Colaborador</span>
         </button>
       </div>
+
+      {listError && (
+        <div role="alert" className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start justify-between gap-2">
+          <span>{listError}</span>
+          <button type="button" onClick={() => setListError(null)} className="hover:text-white">✕</button>
+        </div>
+      )}
+
+      {/* MIGRAÇÃO DO FORMATO ANTIGO (senhas em texto puro -> Firebase Authentication) */}
+      {globalAdmin && (legacyUsers.length > 0 || billingsMissingRegion > 0 || migrationResult) && (
+        <div className="p-5 rounded-2xl bg-amber-500/5 border border-amber-500/40 space-y-3">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-slate-300 space-y-1">
+              <div className="text-sm font-bold text-amber-300">Migração de segurança pendente</div>
+              {legacyUsers.length > 0 && (
+                <p>
+                  <strong>{legacyUsers.length}</strong> usuário(s) ainda estão no formato antigo (senha salva em texto puro no banco).
+                  A migração cria uma conta segura no Firebase Authentication para cada um, com uma <strong>senha temporária nova</strong>,
+                  e apaga a senha antiga do banco.
+                </p>
+              )}
+              {billingsMissingRegion > 0 && (
+                <p>
+                  <strong>{billingsMissingRegion}</strong> faturamento(s) antigos precisam do campo de região para aparecer para os administradores de franquia.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {(legacyUsers.length > 0 || billingsMissingRegion > 0) && (
+            <button
+              type="button"
+              onClick={handleMigrate}
+              disabled={migrating}
+              className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs flex items-center gap-2 disabled:opacity-60"
+            >
+              <RefreshCw className={`w-4 h-4 ${migrating ? 'animate-spin' : ''}`} />
+              {migrating ? 'Migrando...' : 'Migrar dados antigos agora'}
+            </button>
+          )}
+
+          {migrationResult && (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-300">
+                Faturamentos atualizados: <strong>{migrationResult.billingsUpdated}</strong>
+                {migrationResult.billingsFailed > 0 && (
+                  <span className="text-rose-300"> • falharam: {migrationResult.billingsFailed}</span>
+                )}
+              </p>
+              {migrationResult.users.length > 0 && (
+                <>
+                  <p className="text-xs text-amber-200">
+                    ⚠️ Copie ou baixe as senhas temporárias agora — elas <strong>não serão mostradas de novo</strong>. Entregue a cada pessoa por um canal privado
+                    (ou peça para usar "Esqueci minha senha" na tela de login).
+                  </p>
+                  <div className="overflow-x-auto rounded-xl border border-slate-800">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-950 text-slate-400">
+                        <tr>
+                          <th className="py-2 px-3">Nome</th>
+                          <th className="py-2 px-3">E-mail</th>
+                          <th className="py-2 px-3">Senha temporária</th>
+                          <th className="py-2 px-3">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {migrationResult.users.map((r) => (
+                          <tr key={r.email}>
+                            <td className="py-2 px-3 text-white">{r.name}</td>
+                            <td className="py-2 px-3 text-slate-300">{r.email}</td>
+                            <td className="py-2 px-3 font-mono text-emerald-300 select-all">{r.tempPassword || '—'}</td>
+                            <td className={`py-2 px-3 ${r.status === 'ok' ? 'text-emerald-400' : 'text-rose-300'}`}>
+                              {r.status === 'ok' ? 'Migrado' : r.message}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={downloadMigrationCsv}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 border border-slate-700"
+                    >
+                      <Download className="w-3.5 h-3.5" /> Baixar lista (CSV)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMigrationResult(null)}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 text-xs border border-slate-700"
+                    >
+                      Já guardei, fechar
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -246,9 +451,9 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
             className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white text-xs focus:ring-1 focus:ring-sky-500"
           >
             <option value="TODAS">Todas as Franquias ({users.length} usuários)</option>
-            <option value="CWB">Base Curitiba (CWB)</option>
-            <option value="REC">Base Recife (REC)</option>
-            {FRANCHISES.map((f) => (
+            {globalAdmin && <option value="CWB">Base Curitiba (CWB)</option>}
+            {globalAdmin && <option value="REC">Base Recife (REC)</option>}
+            {allowedFranchises.map((f) => (
               <option key={f.code} value={f.code}>
                 {f.code} — {f.airport}
               </option>
@@ -282,7 +487,7 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
                 const franchiseDetails = FRANCHISES.find((f) => f.code === u.franchise);
 
                 return (
-                  <tr key={u.id} className="hover:bg-slate-800/40 transition-colors">
+                  <tr key={u.docId || u.email} className="hover:bg-slate-800/40 transition-colors">
                     {/* Name & Email */}
                     <td className="py-3.5 px-4">
                       <div className="flex items-center gap-3">
@@ -369,12 +574,13 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
                       <button
                         type="button"
                         onClick={() => handleToggleActive(u)}
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold transition-colors ${
+                        disabled={!canManage(u)}
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-70 ${
                           u.active !== false
                             ? 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
                             : 'bg-rose-500/10 text-rose-400 hover:bg-rose-500/20'
                         }`}
-                        title="Clique para alternar status ativo/inativo"
+                        title={canManage(u) ? 'Clique para alternar status ativo/inativo' : 'Sem permissão para alterar este usuário'}
                       >
                         {u.active !== false ? (
                           <>
@@ -392,7 +598,15 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
 
                     {/* Actions */}
                     <td className="py-3.5 px-4 text-center">
+                      {!canManage(u) ? (
+                        <span className="text-[10px] text-slate-500 flex items-center justify-center gap-1" title="Sem permissão para alterar este usuário">
+                          <Lock className="w-3 h-3" /> {u.email?.toLowerCase() === currentUser.email.toLowerCase() ? 'Você' : 'Restrito'}
+                        </span>
+                      ) : (
                       <div className="flex items-center justify-center gap-1.5">
+                        {!u.authUid && (
+                          <span className="text-[10px] text-amber-400" title="Formato antigo — rode a migração">antigo</span>
+                        )}
                         <button
                           type="button"
                           onClick={() => openEditUserModal(u)}
@@ -410,6 +624,7 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
+                      )}
                     </td>
                   </tr>
                 );
@@ -451,8 +666,13 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
             {/* Form */}
             <form onSubmit={handleSaveUser} className="p-5 space-y-4">
               {formError && (
-                <div className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs">
+                <div role="alert" className="p-3 rounded-xl bg-rose-500/15 border border-rose-500/30 text-rose-300 text-xs">
                   {formError}
+                </div>
+              )}
+              {formInfo && (
+                <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">
+                  {formInfo}
                 </div>
               )}
 
@@ -482,23 +702,51 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
                     required
                     value={formEmail}
                     onChange={(e) => setFormEmail(e.target.value)}
+                    readOnly={!!editingUser}
+                    title={editingUser ? 'O e-mail é a chave da conta de acesso e não pode ser alterado' : undefined}
                     placeholder="nome@protecbag.com.br"
-                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-white text-xs focus:ring-1 focus:ring-sky-500"
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-white text-xs focus:ring-1 focus:ring-sky-500 read-only:opacity-60"
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Senha / PIN Inicial
-                  </label>
-                  <input
-                    type="text"
-                    value={formPassword}
-                    onChange={(e) => setFormPassword(e.target.value)}
-                    placeholder="123"
-                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-white text-xs focus:ring-1 focus:ring-sky-500 font-mono"
-                  />
-                </div>
+                {editingUser ? (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Senha</label>
+                    <button
+                      type="button"
+                      onClick={handleSendReset}
+                      className="w-full px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-sky-300 text-xs flex items-center justify-center gap-1.5"
+                    >
+                      <Key className="w-3.5 h-3.5" /> Enviar link de nova senha
+                    </button>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Senha Inicial * (mín. 6)
+                    </label>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        required
+                        minLength={6}
+                        autoComplete="new-password"
+                        value={formPassword}
+                        onChange={(e) => setFormPassword(e.target.value)}
+                        className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-white text-xs focus:ring-1 focus:ring-sky-500 font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setFormPassword(generateTempPassword(10))}
+                        className="px-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300"
+                        title="Gerar outra senha"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-1">Entregue por canal privado. Não fica salva no banco.</p>
+                  </div>
+                )}
               </div>
 
               {/* Phone */}
@@ -573,6 +821,7 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
                     </div>
                   </label>
 
+                  {globalAdmin && (<>
                   {/* Administrador Geral */}
                   <label
                     className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
@@ -624,6 +873,7 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
                       </p>
                     </div>
                   </label>
+                  </>)}
                 </div>
               </div>
 
@@ -640,13 +890,13 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
                     onChange={(e) => setFormFranchise(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-white text-xs focus:ring-1 focus:ring-sky-500"
                   >
-                    {formRole === 'admin_franquia' && (
+                    {formRole === 'admin_franquia' && globalAdmin && (
                       <>
                         <option value="CWB">Base Curitiba — Todas as Unidades CWB (CWB01, CWB02, CWB03)</option>
                         <option value="REC">Base Recife — Todas as Unidades REC (REC01, REC02, REC03)</option>
                       </>
                     )}
-                    {FRANCHISES.map((f) => (
+                    {allowedFranchises.map((f) => (
                       <option key={f.code} value={f.code}>
                         {f.code} — {f.airport} ({f.city} - {f.state})
                       </option>
@@ -691,10 +941,11 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
                 </button>
                 <button
                   type="submit"
-                  className="px-6 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-lg shadow-sky-600/30 transition-all flex items-center gap-2"
+                  disabled={saving}
+                  className="px-6 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-lg shadow-sky-600/30 transition-all flex items-center gap-2 disabled:opacity-60"
                 >
-                  <CheckCircle2 className="w-4 h-4" />
-                  Salvar Colaborador no Banco
+                  {saving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                  {saving ? 'Salvando...' : editingUser ? 'Salvar Alterações' : 'Criar Acesso'}
                 </button>
               </div>
             </form>
@@ -727,9 +978,13 @@ export const CollaboratorsManager: React.FC<CollaboratorsManagerProps> = ({ onUs
               <button
                 type="button"
                 onClick={async () => {
-                  await storage.deleteUser(userToDelete.id);
+                  const target = userToDelete;
                   setUserToDelete(null);
-                  refreshList();
+                  try {
+                    await storage.deleteUser(target);
+                  } catch (err) {
+                    setListError(err instanceof Error ? err.message : 'Falha ao excluir o usuário.');
+                  }
                 }}
                 className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/30 transition-all flex items-center justify-center gap-1.5"
               >

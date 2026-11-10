@@ -6,9 +6,13 @@ import {
   formatDateBR, 
   formatMonthBR, 
   storage, 
-  canAdminAccessFranchise, 
-  getAllowedFranchisesForAdmin 
-} from '../mockData';
+  canAdminAccessFranchise,
+  getAllowedFranchisesForAdmin,
+  isGlobalAdmin as checkGlobalAdmin,
+  useStoreVersion,
+  todayLocalISO,
+  csvCell,
+} from '../store';
 import { AuditModal } from './AuditModal';
 import { CollaboratorsManager } from './CollaboratorsManager';
 import { ReportPdfModal } from './ReportPdfModal';
@@ -53,18 +57,13 @@ import {
 
 interface AdminPanelProps {
   currentUser: User;
-  onDataChanged: () => void;
 }
 
-export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChanged }) => {
+export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser }) => {
   const adminName = currentUser.name;
-  
+
   // Differentiate between Administrador Geral (Total network) vs Administrador de Franquia (Scoped base)
-  const isGlobalAdmin =
-    currentUser.role === 'admin' &&
-    (currentUser.franchise === 'TODAS' ||
-      currentUser.franchise === 'TODAS / Matriz' ||
-      currentUser.email === 'thetoic@gmail.com');
+  const isGlobalAdmin = checkGlobalAdmin(currentUser);
 
   const allowedFranchises = useMemo(
     () => getAllowedFranchisesForAdmin(currentUser),
@@ -75,11 +74,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChang
   const [activeTab, setActiveTab] = useState<'faturamento' | 'colaboradores'>('faturamento');
 
   // Billings list from storage
-  const [billings, setBillings] = useState<ShiftBilling[]>(() => storage.getBillings());
+  // Atualiza em tempo real (Firestore onSnapshot) sem remontar o painel nem perder filtros.
+  const storeVersion = useStoreVersion();
+  const billings = useMemo<ShiftBilling[]>(() => storage.getBillings(), [storeVersion]);
+  const dataLoaded = storage.isLoaded();
 
-  // Cloud sync status
-  const [syncing, setSyncing] = useState<boolean>(false);
-  const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  // Feedback de operações (erros de gravação não são mais engolidos)
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // PDF Report Modal state
   const [isPdfModalOpen, setIsPdfModalOpen] = useState<boolean>(false);
@@ -101,26 +102,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChang
   const [auditingBilling, setAuditingBilling] = useState<ShiftBilling | null>(null);
   const [billingToDelete, setBillingToDelete] = useState<ShiftBilling | null>(null);
 
-  // Reload data
-  const reloadData = () => {
-    setBillings(storage.getBillings());
-    onDataChanged();
-  };
-
-  // Sync with Cloud Firestore
-  const handleCloudSync = async () => {
-    setSyncing(true);
-    setSyncStatus('Sincronizando com Firestore...');
+  // Executa uma gravação e mostra o erro na tela se falhar
+  const runAction = async (fn: () => Promise<void>): Promise<boolean> => {
+    setActionError(null);
     try {
-      const res = await storage.syncFromCloudFirestore();
-      reloadData();
-      setSyncStatus(`Nuvem sincronizada (${res.billingsCount} faturamentos e ${res.usersCount} colaboradores)`);
-      setTimeout(() => setSyncStatus(null), 4000);
-    } catch {
-      setSyncStatus('Modo offline ativo (armazenamento local).');
-      setTimeout(() => setSyncStatus(null), 4000);
-    } finally {
-      setSyncing(false);
+      await fn();
+      return true;
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Falha ao salvar. Tente novamente.');
+      return false;
     }
   };
 
@@ -340,8 +330,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChang
       updatedAt: new Date().toISOString(),
       auditNotes: b.auditNotes || 'Aprovado em revisão direta pelo administrador.',
     };
-    storage.updateBilling(updated);
-    reloadData();
+    void runAction(() => storage.updateBilling(updated));
   };
 
   // CSV Export
@@ -374,26 +363,29 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChang
       const divergent = isDivergent(b) ? 'SIM (DIVERGENTE)' : 'NAO (CONFERE)';
       const diff = b.totalAmount - paySum;
 
+      // Valores com vírgula decimal (padrão do Excel em pt-BR)
+      const money = (v: number | undefined) => (v || 0).toFixed(2).replace('.', ',');
+
       return [
-        b.id,
-        b.month || b.date.substring(0, 7),
-        b.date,
-        b.shift,
-        b.franchise,
-        `"${b.collaboratorName.replace(/"/g, '""')}"`,
+        csvCell(b.id),
+        csvCell(b.month || b.date.substring(0, 7)),
+        csvCell(b.date),
+        csvCell(b.shift),
+        csvCell(b.franchise),
+        csvCell(b.collaboratorName),
         itemsCount,
-        b.totalAmount.toFixed(2),
-        paySum.toFixed(2),
-        diff.toFixed(2),
-        divergent,
-        b.payments.credit.toFixed(2),
-        b.payments.debit.toFixed(2),
-        b.payments.pix.toFixed(2),
-        b.payments.cash.toFixed(2),
-        b.status,
-        `"${(b.collaboratorNotes || '').replace(/"/g, '""')}"`,
-        `"${(b.auditNotes || '').replace(/"/g, '""')}"`,
-        `"${(b.auditedBy || '').replace(/"/g, '""')}"`,
+        money(b.totalAmount),
+        money(paySum),
+        money(diff),
+        csvCell(divergent),
+        money(b.payments.credit),
+        money(b.payments.debit),
+        money(b.payments.pix),
+        money(b.payments.cash),
+        csvCell(b.status),
+        csvCell(b.collaboratorNotes),
+        csvCell(b.auditNotes),
+        csvCell(b.auditedBy),
       ].join(';');
     });
 
@@ -402,10 +394,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChang
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `protecbag_faturamentos_${selectedMonth}_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `protecbag_faturamentos_${selectedMonth}_${todayLocalISO()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -442,29 +435,29 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChang
           </button>
         </div>
 
-        {/* Cloud Sync Button */}
-        <div className="flex items-center gap-2">
-          {syncStatus && (
-            <span className="text-[11px] text-emerald-400 font-medium animate-pulse">
-              {syncStatus}
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={handleCloudSync}
-            disabled={syncing}
-            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 flex items-center gap-1.5 transition-colors disabled:opacity-60"
-            title="Sincronizar banco de dados na nuvem (Firestore)"
-          >
-            <Cloud className={`w-3.5 h-3.5 text-sky-400 ${syncing ? 'animate-spin' : ''}`} />
-            <span>{syncing ? 'Sincronizando...' : 'Sincronizar Nuvem'}</span>
-          </button>
+        {/* Status da sincronização em tempo real */}
+        <div
+          className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs font-medium border border-slate-700 flex items-center gap-1.5"
+          title="Os dados são sincronizados automaticamente com o Firestore"
+        >
+          <Cloud className={`w-3.5 h-3.5 ${dataLoaded ? 'text-emerald-400' : 'text-sky-400 animate-pulse'}`} />
+          <span>{dataLoaded ? 'Sincronizado em tempo real' : 'Carregando dados...'}</span>
         </div>
       </div>
 
+      {actionError && (
+        <div role="alert" className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start justify-between gap-2.5">
+          <span className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+            {actionError}
+          </span>
+          <button type="button" onClick={() => setActionError(null)} className="text-rose-300 hover:text-white">✕</button>
+        </div>
+      )}
+
       {/* RENDER CONTENT BASED ON ACTIVE TAB */}
       {activeTab === 'colaboradores' ? (
-        <CollaboratorsManager onUsersUpdated={onDataChanged} />
+        <CollaboratorsManager currentUser={currentUser} />
       ) : (
         /* FATURAMENTO & AUDITORIA VIEW */
         <div className="space-y-6">
@@ -1306,9 +1299,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChang
               billing={auditingBilling}
               adminName={adminName}
               onClose={() => setAuditingBilling(null)}
-              onSave={() => {
+              onSave={() => setAuditingBilling(null)}
+              onRequestDelete={(b) => {
                 setAuditingBilling(null);
-                reloadData();
+                setBillingToDelete(b);
               }}
             />
           )}
@@ -1342,9 +1336,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onDataChang
                   <button
                     type="button"
                     onClick={async () => {
-                      await storage.deleteBilling(billingToDelete.id);
+                      const target = billingToDelete;
                       setBillingToDelete(null);
-                      reloadData();
+                      await runAction(() => storage.deleteBilling(target.id));
                     }}
                     className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/30 transition-all flex items-center justify-center gap-1.5"
                   >
