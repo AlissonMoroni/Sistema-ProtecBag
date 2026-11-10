@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { User, ShiftBilling, ShiftType, ServiceProductItem, PaymentMethods } from '../types';
-import { DEFAULT_CATALOG, FRANCHISES, formatCurrency, formatDateBR, storage } from '../mockData';
+import { DEFAULT_CATALOG, FRANCHISES, formatCurrency, formatDateBR, storage, todayLocalISO, newId, useStoreVersion } from '../store';
 import { 
   Lock, 
   Send, 
@@ -32,7 +32,11 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
   onBillingCreated,
 }) => {
   // Today's date YYYY-MM-DD
-  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  // Data LOCAL (antes usava UTC e, depois das 21h no Brasil, já marcava o dia seguinte)
+  const todayStr = useMemo(() => todayLocalISO(), []);
+  const canSubmit = currentUser.role === 'colaborador';
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const storeVersion = useStoreVersion();
 
   // Form State
   const [date, setDate] = useState<string>(todayStr);
@@ -95,15 +99,15 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
     return FRANCHISES.find((f) => f.code === currentUser.franchise);
   }, [currentUser.franchise]);
 
-  // CRITICAL RULE: In launch history, the collaborator can see ONLY their own launches
+  // Colaborador: somente os próprios lançamentos (por ID — antes também casava pelo NOME,
+  // o que mostrava lançamentos de homônimos). Usuário de consulta: todos da sua franquia.
+  // O Firestore já entrega apenas o que o perfil pode ver; o filtro aqui é uma segunda barreira.
   const myBillings = useMemo(() => {
     const all = storage.getBillings();
-    return all.filter(
-      (b) =>
-        b.collaboratorId === currentUser.id ||
-        (b.collaboratorName && b.collaboratorName.toLowerCase() === currentUser.name.toLowerCase())
-    );
-  }, [currentUser.id, currentUser.name, feedback]);
+    return canSubmit
+      ? all.filter((b) => b.collaboratorId === currentUser.id)
+      : all.filter((b) => b.franchise === currentUser.franchise);
+  }, [currentUser.id, currentUser.franchise, canSubmit, storeVersion]);
 
   // Product quantity change handler
   const handleQuantityChange = (id: string, delta: number) => {
@@ -126,9 +130,19 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
     );
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFeedback(null);
+
+    if (!canSubmit) {
+      setFeedback({ type: 'error', message: 'Seu perfil é somente de consulta e não pode enviar lançamentos.' });
+      return;
+    }
+
+    if (date > todayLocalISO()) {
+      setFeedback({ type: 'error', message: 'A data do turno não pode estar no futuro.' });
+      return;
+    }
 
     const manualVal = typeof manualProductsAmount === 'number' ? manualProductsAmount : 0;
 
@@ -151,7 +165,7 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
     }
 
     const newBilling: ShiftBilling = {
-      id: `bil_${Date.now()}`,
+      id: newId('bil'),
       date,
       month: date.substring(0, 7),
       shift,
@@ -177,7 +191,18 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    storage.saveBilling(newBilling);
+    setSubmitting(true);
+    try {
+      await storage.saveBilling(newBilling);
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        message: `Não foi possível enviar o lançamento: ${err instanceof Error ? err.message : 'erro desconhecido'}. Seus dados continuam no formulário — tente novamente.`,
+      });
+      return;
+    } finally {
+      setSubmitting(false);
+    }
     onBillingCreated();
 
     // Reset Form completely
@@ -285,7 +310,8 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
         </div>
       )}
 
-      {/* MAIN FORM */}
+      {/* MAIN FORM (somente colaboradores; perfil de consulta vê apenas o histórico) */}
+      {canSubmit && (
       <form onSubmit={handleSubmit} className="space-y-6">
         
         {/* Section 1: Header information (Date, Shift, Franchise Lock) */}
@@ -332,6 +358,7 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
                 <input
                   type="date"
                   required
+                  max={todayStr}
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
                   className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white text-sm focus:outline-none focus:ring-2 focus:ring-sky-500"
@@ -676,14 +703,16 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
 
             <button
               type="submit"
-              className="w-full sm:w-auto px-8 py-3 rounded-xl bg-gradient-to-r from-sky-600 via-blue-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl shadow-sky-600/30 transition-all flex items-center justify-center gap-2"
+              disabled={submitting}
+              className="w-full sm:w-auto px-8 py-3 rounded-xl bg-gradient-to-r from-sky-600 via-blue-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white font-bold text-sm shadow-xl shadow-sky-600/30 transition-all flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <Send className="w-4 h-4" />
-              <span>Enviar Fechamento de Turno</span>
+              <span>{submitting ? 'Enviando...' : 'Enviar Fechamento de Turno'}</span>
             </button>
           </div>
         </div>
       </form>
+      )}
 
       {/* Section 5: Collaborator's Own History Table */}
       <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-xl space-y-4">
@@ -691,14 +720,16 @@ export const CollaboratorPanel: React.FC<CollaboratorPanelProps> = ({
           <div>
             <h2 className="text-base font-bold text-white flex items-center gap-2">
               <History className="w-4 h-4 text-sky-400" />
-              Histórico dos Meus Lançamentos ({currentUser.franchise})
+              {canSubmit ? 'Histórico dos Meus Lançamentos' : 'Lançamentos da Franquia'} ({currentUser.franchise})
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Visualizando exclusivamente os lançamentos de turno enviados pelo seu usuário ({currentUser.name}).
+              {canSubmit
+                ? `Visualizando exclusivamente os lançamentos de turno enviados pelo seu usuário (${currentUser.name}).`
+                : 'Modo consulta: todos os fechamentos de turno da sua franquia e o status de auditoria.'}
             </p>
           </div>
           <span className="text-xs font-mono font-semibold px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 border border-slate-700">
-            {myBillings.length} meus registros
+            {myBillings.length} {canSubmit ? 'meus registros' : 'registros'}
           </span>
         </div>
 

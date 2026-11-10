@@ -7,10 +7,15 @@ export type BillingStatus = 'Pendente' | 'Aprovado' | 'Rejeitado';
 export interface User {
   id: string;
   name: string;
-  email: string;
-  password?: string;
+  email: string; // sempre em minúsculas; também é o ID do documento em /users
   role: UserRole;
   franchise: string; // "TODAS / Matriz" (Admin Geral), "CWB" (Base Curitiba), "REC" (Base Recife), or specific: "CWB01", "CWB02", "CWB03", "REC01", "REC02", "REC03"
+  region?: string; // "TODAS", "CWB" ou "REC" — usado pelas regras do Firestore para isolar franquias
+  authUid?: string; // UID da conta no Firebase Authentication vinculada a este perfil
+  /** @deprecated Só existe em documentos antigos (antes da migração). Nunca gravar. */
+  password?: string;
+  /** Só em memória: ID real do documento no Firestore (difere do e-mail em perfis antigos). */
+  docId?: string;
   active?: boolean;
   phone?: string;
   createdAt: string;
@@ -38,6 +43,7 @@ export interface ShiftBilling {
   month: string; // YYYY-MM for monthly consolidation
   shift: ShiftType;
   franchise: string; // Locked to user's franchise for colaborador
+  region?: string; // "CWB" ou "REC" — derivado da franquia, usado pelas regras do Firestore
   collaboratorId: string;
   collaboratorName: string;
   products: ServiceProductItem[];

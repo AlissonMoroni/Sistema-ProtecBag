@@ -1,92 +1,169 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
+import { onAuthStateChanged, signOut, User as FirebaseUser } from 'firebase/auth';
 import { User } from './types';
-import { storage } from './mockData';
+import { auth } from './firebase';
+import { storage, OWNER_EMAIL, isAnyAdmin, useStoreVersion } from './store';
 import { Navbar } from './components/Navbar';
 import { AuthModal } from './components/AuthModal';
 import { CollaboratorPanel } from './components/CollaboratorPanel';
-import { AdminPanel } from './components/AdminPanel';
-import { 
-  ShieldCheck, 
-  Building2, 
-  UserCheck, 
-  AlertCircle, 
-  RefreshCw, 
-  Lock, 
-  HelpCircle,
-  FileSpreadsheet,
-  CheckCircle2,
-  Cloud
-} from 'lucide-react';
+import { ShieldCheck, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
+import './index.css';
+
+// O painel administrativo (gráficos + PDF) é pesado: só carrega para administradores.
+const AdminPanel = lazy(() =>
+  import('./components/AdminPanel').then((m) => ({ default: m.AdminPanel }))
+);
+
+type AuthState = 'loading' | 'signedOut' | 'signedIn';
+
+/**
+ * Resolve o perfil de quem fez login no Firebase Auth.
+ * Retorna o perfil ou lança um erro com mensagem amigável.
+ */
+async function resolveProfile(fbUser: FirebaseUser): Promise<User> {
+  const email = (fbUser.email || '').toLowerCase();
+  if (!email) throw new Error('Esta conta não possui e-mail.');
+
+  const profile = await storage.fetchOwnProfile(email);
+
+  if (email === OWNER_EMAIL) {
+    if (!fbUser.emailVerified) {
+      throw new Error('Para o administrador principal, entre com "Entrar com Google" (e-mail verificado).');
+    }
+    if (!profile || profile.authUid !== fbUser.uid || profile.role !== 'admin') {
+      // Primeiro acesso do dono: cria/atualiza o perfil vinculado à conta.
+      const ownerProfile: User = {
+        id: profile?.id || 'usr_owner',
+        name: profile?.name || fbUser.displayName || 'Administrador',
+        email,
+        role: 'admin',
+        franchise: 'TODAS / Matriz',
+        active: true,
+        phone: profile?.phone || '',
+        authUid: fbUser.uid,
+        createdAt: profile?.createdAt || new Date().toISOString(),
+      };
+      await storage.saveUserProfile(ownerProfile);
+      return { ...ownerProfile, docId: email };
+    }
+    return profile;
+  }
+
+  if (!profile) {
+    throw new Error('Seu acesso ainda não foi cadastrado. Fale com a administração.');
+  }
+  if (profile.authUid !== fbUser.uid) {
+    throw new Error('Esta conta não está vinculada a um perfil válido. Fale com a administração.');
+  }
+  if (profile.active === false) {
+    throw new Error('Este usuário está desativado no sistema. Contate a administração.');
+  }
+  return profile;
+}
 
 const App: React.FC = () => {
-  const [currentUser, setCurrentUser] = useState<User | null>(() => storage.getCurrentUser());
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(() => !storage.getCurrentUser());
-  const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' } | null>(null);
-  const [, setCloudOnline] = useState<boolean>(true);
+  const [authState, setAuthState] = useState<AuthState>('loading');
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authError, setAuthErrorState] = useState<{ message: string; at: number } | null>(null);
+  const setAuthError = (message: string | null) =>
+    setAuthErrorState(message ? { message, at: Date.now() } : null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
 
+  useStoreVersion(); // re-renderiza quando o Firestore muda (para o aviso de erro de sincronização)
+  const syncError = storage.getSyncError();
+
+  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+    window.clearTimeout(toastTimer.current);
+    setToast({ message, type });
+    toastTimer.current = window.setTimeout(() => setToast(null), 3500);
+  };
+
+  // 1. Sessão: fonte única de verdade é o Firebase Authentication.
   useEffect(() => {
-    // 1. Live Firestore Realtime Sync: ensures data is never lost across reloads/sessions
-    const unsubCloud = storage.subscribeToCloud(() => {
-      setRefreshTrigger((prev) => prev + 1);
+    let unwatchProfile: (() => void) | null = null;
+
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      unwatchProfile?.();
+      unwatchProfile = null;
+
+      if (!fbUser) {
+        storage.stopSync();
+        setCurrentUser(null);
+        setAuthState('signedOut');
+        return;
+      }
+
+      try {
+        const profile = await resolveProfile(fbUser);
+        setAuthError(null);
+        setCurrentUser(profile);
+        setAuthState('signedIn');
+
+        // Se o perfil for desativado ou alterado por um admin, aplica na hora.
+        unwatchProfile = storage.watchOwnProfile(profile.email, (fresh) => {
+          if (fresh?.email === OWNER_EMAIL) return;
+          if (!fresh || fresh.active === false || fresh.authUid !== fbUser.uid) {
+            setAuthError('Seu acesso foi removido ou desativado.');
+            signOut(auth);
+            return;
+          }
+          setCurrentUser((prev) =>
+            prev && (prev.role !== fresh.role || prev.franchise !== fresh.franchise || prev.name !== fresh.name)
+              ? fresh
+              : prev
+          );
+        });
+      } catch (err) {
+        setAuthError(err instanceof Error ? err.message : 'Falha ao carregar seu perfil.');
+        await signOut(auth);
+      }
     });
 
-    // 2. Initial sync with Cloud Firestore
-    storage.syncFromCloudFirestore()
-      .then((res) => {
-        setCloudOnline(true);
-        setRefreshTrigger((prev) => prev + 1);
-        console.log(`Firestore sincronizado com sucesso: ${res.billingsCount} turnos, ${res.usersCount} colaboradores.`);
-      })
-      .catch((err) => {
-        setCloudOnline(false);
-        console.warn('Operando com cache local offline:', err);
-      });
-
     return () => {
-      unsubCloud();
+      unwatchProfile?.();
+      unsub();
     };
   }, []);
 
-  const showToast = (message: string, type: 'success' | 'info' = 'success') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3500);
-  };
+  // 2. Dados: abre a sincronização com o escopo do perfil logado.
+  useEffect(() => {
+    if (!currentUser) return;
+    storage.startSync(currentUser);
+    return () => storage.stopSync();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id, currentUser?.role, currentUser?.franchise]);
 
-  const handleSwitchUser = (newUser: User) => {
-    storage.setCurrentUser(newUser);
-    setCurrentUser(newUser);
-    setIsAuthModalOpen(false);
-    showToast(`Conectado como ${newUser.name} (${newUser.role === 'admin' ? 'Administrador Geral' : newUser.role === 'admin_franquia' ? `Admin de Franquia (${newUser.franchise})` : newUser.franchise})`);
-  };
-
-  const handleLogout = () => {
-    storage.setCurrentUser(null);
-    setCurrentUser(null);
-    setIsAuthModalOpen(true);
+  const handleLogout = async () => {
+    await signOut(auth);
     showToast('Sessão encerrada com sucesso.', 'info');
   };
 
-  const handleResetData = () => {
-    storage.resetToDemo();
-    const defaultUser = storage.getCurrentUser();
-    setCurrentUser(defaultUser);
-    setRefreshTrigger((prev) => prev + 1);
-    showToast('Dados de demonstração restaurados com sucesso!');
-  };
-
-  const triggerDataRefresh = () => {
-    setRefreshTrigger((prev) => prev + 1);
-  };
+  const roleLabel = (u: User) =>
+    u.role === 'admin'
+      ? 'Administrador Geral'
+      : u.role === 'admin_franquia'
+      ? 'Admin de Franquia'
+      : u.role === 'colaborador'
+      ? 'Colaborador'
+      : 'Usuário Normal';
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100 selection:bg-sky-500 selection:text-white">
       {/* Toast Notification */}
       {toast && (
-        <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-5 fade-in duration-200">
-          <div className="px-4 py-3 rounded-xl bg-slate-900 border border-sky-500/40 text-white shadow-2xl flex items-center gap-3 text-sm">
-            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+        <div className="fixed bottom-6 right-6 z-50" role="status" aria-live="polite">
+          <div
+            className={`px-4 py-3 rounded-xl bg-slate-900 border text-white shadow-2xl flex items-center gap-3 text-sm ${
+              toast.type === 'error' ? 'border-rose-500/50' : 'border-sky-500/40'
+            }`}
+          >
+            {toast.type === 'error' ? (
+              <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+            )}
             <span>{toast.message}</span>
           </div>
         </div>
@@ -95,23 +172,26 @@ const App: React.FC = () => {
       {/* Main Navigation */}
       <Navbar
         currentUser={currentUser}
-        onSwitchUser={handleSwitchUser}
         onLogout={handleLogout}
-        onOpenAuth={() => setIsAuthModalOpen(true)}
-        onResetData={handleResetData}
+        onOpenAuth={() => setAuthState('signedOut')}
       />
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {currentUser ? (
+        {authState === 'loading' ? (
+          <div className="py-24 flex items-center justify-center gap-3 text-slate-400 text-sm">
+            <RefreshCw className="w-4 h-4 animate-spin text-sky-400" />
+            Verificando sessão...
+          </div>
+        ) : currentUser ? (
           <div>
             {/* View Context Banner */}
             <div className="mb-6 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400 border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
                 <span>Sessão ativa: <strong>{currentUser.name}</strong></span>
                 <span className="text-slate-600">|</span>
-                <span>Perfil: <strong className="text-slate-200 uppercase">{currentUser.role === 'admin' ? 'Administrador Geral' : currentUser.role === 'admin_franquia' ? 'Admin de Franquia' : currentUser.role}</strong></span>
+                <span>Perfil: <strong className="text-slate-200 uppercase">{roleLabel(currentUser)}</strong></span>
                 <span className="text-slate-600">|</span>
                 <span>
                   Franquia Vinculada:{' '}
@@ -125,7 +205,6 @@ const App: React.FC = () => {
                 </span>
               </div>
 
-              {/* System Active Badge */}
               <div className="flex items-center gap-2">
                 <span className="text-slate-400 text-[11px] flex items-center gap-1.5">
                   <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
@@ -134,21 +213,30 @@ const App: React.FC = () => {
               </div>
             </div>
 
+            {syncError && (
+              <div className="mb-6 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+                <span>{syncError}</span>
+              </div>
+            )}
+
             {/* Role Conditional Rendering */}
-            {currentUser.role === 'admin' || currentUser.role === 'admin_franquia' ? (
-              <AdminPanel
-                key={`admin-${currentUser.id}-${refreshTrigger}`}
-                currentUser={currentUser}
-                onDataChanged={triggerDataRefresh}
-              />
+            {isAnyAdmin(currentUser) ? (
+              <Suspense
+                fallback={
+                  <div className="py-24 flex items-center justify-center gap-3 text-slate-400 text-sm">
+                    <RefreshCw className="w-4 h-4 animate-spin text-sky-400" />
+                    Carregando painel administrativo...
+                  </div>
+                }
+              >
+                <AdminPanel key={`admin-${currentUser.id}`} currentUser={currentUser} />
+              </Suspense>
             ) : (
               <CollaboratorPanel
-                key={`colab-${currentUser.id}-${refreshTrigger}`}
+                key={`colab-${currentUser.id}`}
                 currentUser={currentUser}
-                onBillingCreated={() => {
-                  showToast('Lançamento enviado para auditoria!');
-                  triggerDataRefresh();
-                }}
+                onBillingCreated={() => showToast('Lançamento enviado para auditoria!')}
               />
             )}
           </div>
@@ -162,13 +250,6 @@ const App: React.FC = () => {
             <p className="text-sm text-slate-400 max-w-md mx-auto">
               Acesse o sistema corporativo ProtecBag com seu e-mail e senha autorizados.
             </p>
-            <button
-              type="button"
-              onClick={() => setIsAuthModalOpen(true)}
-              className="px-6 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold text-sm transition-all"
-            >
-              Fazer Login
-            </button>
           </div>
         )}
       </main>
@@ -187,18 +268,8 @@ const App: React.FC = () => {
         </div>
       </footer>
 
-      {/* Auth Modal */}
-      <AuthModal
-        isOpen={isAuthModalOpen}
-        onClose={() => {
-          if (currentUser) setIsAuthModalOpen(false);
-        }}
-        onSuccess={(user) => {
-          setCurrentUser(user);
-          setIsAuthModalOpen(false);
-          showToast(`Bem-vindo, ${user.name}!`);
-        }}
-      />
+      {/* Auth Modal — some sozinho quando o Firebase confirma o login */}
+      <AuthModal isOpen={authState === 'signedOut'} externalError={authError} />
     </div>
   );
 };

@@ -1,42 +1,148 @@
 rules_version = '2';
+
+// =====================================================================
+// ProtecBag — Regras de segurança do Firestore
+//
+// Modelo:
+//  - Login pelo Firebase Authentication (e-mail/senha ou Google).
+//  - O perfil de cada pessoa fica em /users/{email-em-minúsculas} e guarda
+//    o papel (role), a franquia e o authUid da conta no Firebase Auth.
+//  - O perfil só vale se authUid == UID de quem está logado e active != false.
+//  - O dono do sistema (OWNER_EMAIL) é Administrador Geral mesmo sem perfil,
+//    desde que entre com o e-mail verificado (ex.: "Entrar com Google").
+//  - Nenhuma senha é guardada no Firestore.
+// =====================================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function isSignedIn() {
-      return request.auth != null;
+    // ---------- Identidade ----------
+    function signedIn() {
+      return request.auth != null && request.auth.token.email != null;
     }
 
-    // All users created or authenticated directly via Firebase are Admins
-    function isAdmin() {
-      return isSignedIn() || (
-        request.auth != null && (
-          request.auth.token.email == 'thetoic@gmail.com' ||
-          request.auth.token.email == 'admin@protecbag.com.br' ||
-          request.auth.token.firebase != null
-        )
-      );
+    function myEmail() {
+      return request.auth.token.email.lower();
     }
 
-    // Default deny catch-all
+    function isOwner() {
+      return signedIn()
+        && myEmail() == 'thetoic@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function profilePath() {
+      return /databases/$(database)/documents/users/$(myEmail());
+    }
+
+    function me() {
+      return get(profilePath()).data;
+    }
+
+    function hasProfile() {
+      return signedIn()
+        && exists(profilePath())
+        && me().get('authUid', '') == request.auth.uid
+        && me().get('active', true) == true;
+    }
+
+    function isRole(r) {
+      return hasProfile() && me().role == r;
+    }
+
+    function isGlobalAdmin() {
+      return isOwner() || isRole('admin');
+    }
+
+    function isFranchiseAdmin() {
+      return isRole('admin_franquia') && me().franchise.size() > 0;
+    }
+
+    // Admin de franquia com franquia "CWB" enxerga a base inteira (region == CWB);
+    // com franquia "CWB01" enxerga somente aquela unidade.
+    function inAdminScope(d) {
+      return isGlobalAdmin()
+        || (isFranchiseAdmin()
+            && (d.get('region', '') == me().franchise || d.get('franchise', '') == me().franchise));
+    }
+
+    function isLowRole(r) {
+      return r in ['colaborador', 'usuario_normal'];
+    }
+
+    // ---------- Validações ----------
+    function validUser(d, key) {
+      return d.keys().hasAll(['id', 'name', 'email', 'role', 'franchise', 'region', 'authUid'])
+        && !('password' in d)
+        && d.email == key
+        && d.role in ['admin', 'admin_franquia', 'colaborador', 'usuario_normal']
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 100
+        && d.franchise is string && d.region is string;
+    }
+
+    function validBilling(d, id) {
+      return d.id == id
+        && d.franchise is string && d.franchise.size() > 0
+        && d.region is string && d.franchise.matches(d.region + '.*')
+        && d.status in ['Pendente', 'Aprovado', 'Rejeitado']
+        && d.shift in ['Manhã', 'Tarde', 'Noite']
+        && d.date is string && d.date.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && d.totalAmount is number;
+    }
+
+    // ---------- Bloqueio padrão ----------
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Connection test document
-    match /test/connection {
-      allow read, write: if true;
+    // ---------- Usuários ----------
+    match /users/{key} {
+      // Qualquer pessoa logada pode ler o PRÓPRIO perfil (sem segredos).
+      allow get: if signedIn() && key == myEmail();
+
+      // Administradores leem os perfis dentro do seu escopo.
+      allow read: if inAdminScope(resource.data);
+
+      allow create: if validUser(request.resource.data, key) && (
+        isGlobalAdmin()
+        || (isFranchiseAdmin()
+            && inAdminScope(request.resource.data)
+            && isLowRole(request.resource.data.role))
+      );
+
+      // Documentos antigos (formato legado, com id "usr_...") só podem ser
+      // migrados/apagados pelo Administrador Geral.
+      allow update: if (isGlobalAdmin() && validUser(request.resource.data, key))
+        || (isFranchiseAdmin()
+            && validUser(request.resource.data, key)
+            && inAdminScope(resource.data) && isLowRole(resource.data.role)
+            && inAdminScope(request.resource.data) && isLowRole(request.resource.data.role)
+            && request.resource.data.authUid == resource.data.authUid);
+
+      allow delete: if isGlobalAdmin()
+        || (isFranchiseAdmin() && inAdminScope(resource.data) && isLowRole(resource.data.role));
     }
 
-    // Users & Collaborators collection
-    // Permite leitura, gravação e exclusão persistente de colaboradores
-    match /users/{userId} {
-      allow read, write: if true;
-    }
-
-    // Billings collection (faturamentos diários e mensais)
-    // Permite leitura, gravação e exclusão de lançamentos pela administração
+    // ---------- Faturamentos ----------
     match /billings/{billingId} {
-      allow read, write: if true;
+      allow read: if inAdminScope(resource.data)
+        || (isRole('colaborador') && resource.data.collaboratorId == me().id)
+        || (isRole('usuario_normal') && resource.data.franchise == me().franchise);
+
+      allow create: if validBilling(request.resource.data, billingId) && (
+        inAdminScope(request.resource.data)
+        || (isRole('colaborador')
+            && request.resource.data.collaboratorId == me().id
+            && request.resource.data.franchise == me().franchise
+            && request.resource.data.status == 'Pendente'
+            && !request.resource.data.keys().hasAny(['auditedBy', 'auditedAt']))
+      );
+
+      allow update: if inAdminScope(resource.data)
+        && inAdminScope(request.resource.data)
+        && validBilling(request.resource.data, billingId);
+
+      allow delete: if inAdminScope(resource.data);
     }
   }
 }

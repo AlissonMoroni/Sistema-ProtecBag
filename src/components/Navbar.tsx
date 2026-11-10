@@ -9,10 +9,8 @@ import {
 
 interface NavbarProps {
   currentUser: User | null;
-  onSwitchUser: (user: User) => void;
   onLogout: () => void;
   onOpenAuth: () => void;
-  onResetData: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({

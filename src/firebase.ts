@@ -1,6 +1,11 @@
-import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  createUserWithEmailAndPassword,
+  signOut,
+} from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
@@ -10,54 +15,53 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
-export enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-export interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-    tenantId?: string | null;
-  };
-}
-
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-    },
-    operationType,
-    path,
-  };
-  console.error('Firestore Error:', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
-
-// Test connectivity
-export async function testFirestoreConnection(): Promise<boolean> {
+/**
+ * Cria uma conta no Firebase Authentication SEM derrubar a sessão do administrador.
+ * O SDK web troca o usuário logado ao criar uma conta, então usamos uma segunda
+ * instância do app só para isso e saímos dela logo em seguida.
+ */
+export async function createAuthAccount(email: string, password: string): Promise<string> {
+  const SECONDARY = 'protecbag-account-creator';
+  const secondaryApp: FirebaseApp = getApps().some((a) => a.name === SECONDARY)
+    ? getApp(SECONDARY)
+    : initializeApp(firebaseConfig, SECONDARY);
+  const secondaryAuth = getAuth(secondaryApp);
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    return true;
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firestore offline fallback activated.');
-    }
-    return false;
+    const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+    return cred.user.uid;
+  } finally {
+    await signOut(secondaryAuth).catch(() => {});
+  }
+}
+
+/** Traduz códigos de erro do Firebase para mensagens em português. */
+export function friendlyFirebaseError(err: unknown): string {
+  const code = (err as { code?: string })?.code || '';
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+    case 'auth/invalid-email':
+      return 'E-mail ou senha incorretos.';
+    case 'auth/too-many-requests':
+      return 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
+    case 'auth/user-disabled':
+      return 'Esta conta foi desativada.';
+    case 'auth/email-already-in-use':
+      return 'Já existe uma conta de acesso com este e-mail.';
+    case 'auth/weak-password':
+      return 'A senha precisa ter pelo menos 6 caracteres.';
+    case 'auth/operation-not-allowed':
+      return 'O login por e-mail/senha não está ativado no Firebase Console.';
+    case 'auth/popup-closed-by-user':
+    case 'auth/cancelled-popup-request':
+      return 'Login cancelado.';
+    case 'auth/network-request-failed':
+    case 'unavailable':
+      return 'Sem conexão com o servidor. Verifique sua internet.';
+    case 'permission-denied':
+      return 'Você não tem permissão para esta operação.';
+    default:
+      return err instanceof Error ? err.message : 'Erro inesperado. Tente novamente.';
   }
 }

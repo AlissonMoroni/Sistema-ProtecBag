@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { ShiftBilling, BillingStatus, ServiceProductItem } from '../types';
-import { formatCurrency, formatDateBR, FRANCHISES, storage } from '../mockData';
+import { formatCurrency, formatDateBR, FRANCHISES, storage } from '../store';
 import { 
   X, 
   CheckCircle2, 
@@ -20,9 +20,11 @@ import {
 } from 'lucide-react';
 
 interface AuditModalProps {
-  billing: ShiftBilling | null;
+  billing: ShiftBilling;
   onClose: () => void;
   onSave: (updated: ShiftBilling) => void;
+  /** Abre a confirmação de exclusão (não exclui direto). */
+  onRequestDelete: (billing: ShiftBilling) => void;
   adminName: string;
 }
 
@@ -30,9 +32,10 @@ export const AuditModal: React.FC<AuditModalProps> = ({
   billing,
   onClose,
   onSave,
+  onRequestDelete,
   adminName,
 }) => {
-  if (!billing) return null;
+  const [saving, setSaving] = useState<boolean>(false);
 
   // Local state for editing
   const [status, setStatus] = useState<BillingStatus>(billing.status);
@@ -81,7 +84,7 @@ export const AuditModal: React.FC<AuditModalProps> = ({
     );
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
@@ -111,8 +114,15 @@ export const AuditModal: React.FC<AuditModalProps> = ({
       updatedAt: new Date().toISOString(),
     };
 
-    storage.updateBilling(updatedBilling);
-    onSave(updatedBilling);
+    setSaving(true);
+    try {
+      await storage.updateBilling(updatedBilling);
+      onSave(updatedBilling);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Falha ao salvar a auditoria.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -430,11 +440,7 @@ export const AuditModal: React.FC<AuditModalProps> = ({
           <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-3">
             <button
               type="button"
-              onClick={async () => {
-                await storage.deleteBilling(billing.id);
-                onClose();
-                onSave(billing);
-              }}
+              onClick={() => onRequestDelete(billing)}
               className="px-3.5 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors"
               title="Excluir este lançamento permanentemente"
             >
@@ -452,10 +458,11 @@ export const AuditModal: React.FC<AuditModalProps> = ({
               </button>
               <button
                 type="submit"
-                className="px-6 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white text-xs font-bold shadow-lg shadow-amber-600/30 transition-all flex items-center gap-2"
+                disabled={saving}
+                className="px-6 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white text-xs font-bold shadow-lg shadow-amber-600/30 transition-all flex items-center gap-2 disabled:opacity-60"
               >
                 <Save className="w-4 h-4" />
-                Salvar Auditoria e Correções
+                {saving ? 'Salvando...' : 'Salvar Auditoria e Correções'}
               </button>
             </div>
           </div>
